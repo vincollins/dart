@@ -20,7 +20,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      # next build generates the Next.js types and runs the type check itself.
+      # A separate `tsc --noEmit` fails in CI because next-env.d.ts is git-ignored.
       - run: npm run build
 
   preview:
