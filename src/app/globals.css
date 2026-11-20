@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+/* DART V2 · CPF brand colours (Figma token sheet). These don't change between themes. */
+@theme {
+  --color-primary: #06abd3;
+  --color-secondary: #d51167;
+  --color-accent: #e1c51a;
+  --color-blue: #076fca;
+
+  /* Theme-aware surfaces, resolved from the variables below */
+  --color-page: var(--theme-page);
+  --color-surface: var(--theme-surface);
+  --color-hover: var(--theme-hover);
+  --color-ink: var(--theme-ink);
+  --color-muted: var(--theme-muted);
+  --color-line: var(--theme-line);
+  --color-positive: var(--theme-positive);
+  --color-negative: var(--theme-negative);
+
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+}
+
+/* Light theme (default, from Figma) */
+:root {
+  --theme-page: #f7f7f7;
+  --theme-surface: #ffffff;
+  --theme-hover: #f1f3f5;
+  --theme-ink: #212121;
+  --theme-muted: #5f6368;
+  --theme-line: rgb(16 24 40 / 0.08);
+  --theme-positive: #15803d;
+  --theme-negative: #b91c1c;
+  --theme-lift:
+    0 1px 2px rgb(16 24 40 / 0.06), 0 6px 16px -6px rgb(16 24 40 / 0.14);
+  color-scheme: light;
+}
+
+/* Dark theme: Figma light palette inverted onto dark surfaces, brand hues kept, lifted for contrast */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --theme-page: #030619;
+    --theme-surface: #0f172a;
+    --theme-hover: #17213a;
+    --theme-ink: #e8eef7;
+    --theme-muted: #8fa8c2;
+    --theme-line: rgb(148 180 220 / 0.12);
+    --theme-positive: #4ade80;
+    --theme-negative: #f87171;
+    --theme-lift:
+      0 1px 2px rgb(0 0 0 / 0.5), 0 8px 20px -8px rgb(0 0 0 / 0.75),
+      inset 0 1px 0 rgb(255 255 255 / 0.04);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --theme-page: #030619;
+  --theme-surface: #0f172a;
+  --theme-hover: #17213a;
+  --theme-ink: #e8eef7;
+  --theme-muted: #8fa8c2;
+  --theme-line: rgb(148 180 220 / 0.12);
+  --theme-positive: #4ade80;
+  --theme-negative: #f87171;
+  --theme-lift:
+    0 1px 2px rgb(0 0 0 / 0.5), 0 8px 20px -8px rgb(0 0 0 / 0.75),
+    inset 0 1px 0 rgb(255 255 255 / 0.04);
+  color-scheme: dark;
+}
+
+/* Raised surface for cards and tiles */
+.card-raised {
+  box-shadow: var(--theme-lift);
+}
+
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
