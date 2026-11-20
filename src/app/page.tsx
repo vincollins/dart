@@ -341,6 +341,8 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
             </p>
           </div>
           <PeriodFilter
+            // Remount when the period changes so the dropdowns show the new value.
+            key={`${year}-${quarter ?? "fy"}-${bd}`}
             bd={bd}
             year={String(year)}
             quarter={quarter ? String(quarter) : ""}
