@@ -1,4 +1,7 @@
-name: CI/CD
+name: CI
+
+# Vercel's GitHub integration handles deployments (previews on pull requests,
+# production on main). This workflow only checks that the app builds.
 
 on:
   push:
@@ -10,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  build:
     name: Type-check and build
     runs-on: ubuntu-latest
     steps:
@@ -23,53 +26,3 @@ jobs:
       # next build generates the Next.js types and runs the type check itself.
       # A separate `tsc --noEmit` fails in CI because next-env.d.ts is git-ignored.
       - run: npm run build
-
-  preview:
-    name: Preview deployment
-    if: github.event_name == 'pull_request'
-    needs: check
-    runs-on: ubuntu-latest
-    environment: preview
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm install --global vercel@latest
-      - run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - run: vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-  production:
-    name: Production deployment
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: check
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm install --global vercel@latest
-      - run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
