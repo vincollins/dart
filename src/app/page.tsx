@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import {
-  AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
   Landmark,
@@ -10,6 +9,9 @@ import {
   Wallet,
 } from "lucide-react";
 import { PeriodFilter } from "./period-filter";
+import ErrorState from "../components/ErrorState";
+import EmptyState from "../components/EmptyState";
+import Loading from "../components/Loading";
 import { connection } from "next/server";
 import {
   ApiError,
@@ -234,14 +236,31 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
       : undefined;
   const period = { year, quarter };
 
-  // Step 2: everything for the selected period, in parallel.
-  const [summary, trend, breakdown] = await Promise.allSettled([
-    getSummary(period),
-    getTrend(year, "month", true),
-    getBreakdown(bd, period, 3),
-  ]);
+  // Periods with no figures yet (a quarter still open, or a year outside the
+  // window) are not requested. They render as "not available" empty states.
+  const selectedRow = rowFor(year);
+  const quarterOpen =
+    !!quarter &&
+    !!selectedRow &&
+    !selectedRow.quarters.find((x) => x.q === quarter)?.closed;
+  const noFigures = !yearList.includes(year) || quarterOpen;
+  const noFiguresMsg = !yearList.includes(year)
+    ? `There is no data for ${year}.`
+    : `${quarter ? `Q${quarter} ${year}` : year} isn’t closed yet.`;
 
-  const firstOk = [summary, trend, breakdown, ...yearly].find(
+  // Step 2: the period summary is awaited (it sets the title and currency).
+  // The monthly trend and breakdown start now and stream into their own panels.
+  const trendP = noFigures
+    ? Promise.resolve(unavailable<TrendResponse>(noFiguresMsg))
+    : settled(getTrend(year, "month", true));
+  const breakdownP = noFigures
+    ? Promise.resolve(unavailable<BreakdownResponse>(noFiguresMsg))
+    : settled(getBreakdown(bd, period, 3));
+  const summary: PromiseSettledResult<SummaryResponse> = noFigures
+    ? unavailable<SummaryResponse>(noFiguresMsg)
+    : await settled(getSummary(period));
+
+  const firstOk = [summary, ...yearly].find(
     (r) => r.status === "fulfilled",
   ) as
     | PromiseFulfilledResult<{ currency: string; dataAsOf: string | null }>
@@ -263,8 +282,12 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
     return `?${q}`;
   };
 
-  const selectedRow = rowFor(year);
-  const yearItems = (rows.length ? rows.map((r) => r.year) : [year]).map(
+  // The selected year is always an option, so an out-of-window year is not
+  // silently replaced by the first year in the list.
+  const yearOptions = [...new Set([...rows.map((r) => r.year), year])].sort(
+    (a, b) => a - b,
+  );
+  const yearItems = yearOptions.map(
     (y) => ({
       key: String(y),
       label: String(y),
@@ -283,22 +306,16 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
           ? `${year} isn’t closed yet`
           : undefined,
     },
-    ...[1, 2, 3, 4].map((q) => {
-      const info = selectedRow?.quarters.find((x) => x.q === q);
-      return {
-        key: `q${q}`,
-        label: `Q${q}`,
-        current: quarter === q,
-        href: href({ quarter: q }),
-        disabledReason:
-          selectedRow && !info?.closed
-            ? `Q${q} ${year} isn’t closed yet`
-            : undefined,
-      };
-    }),
+    // Every quarter can be picked; an open one shows the "not available" state.
+    ...[1, 2, 3, 4].map((q) => ({
+      key: `q${q}`,
+      label: `Q${q}`,
+      current: quarter === q,
+      href: href({ quarter: q }),
+      disabledReason: undefined as string | undefined,
+    })),
   ];
 
-  const monthly = trend.status === "fulfilled" ? trend.value.data : [];
 
   return (
     <div className="min-h-screen bg-page text-ink tabular-nums">
@@ -358,11 +375,9 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
 
         {/* KPI strip */}
         <section aria-label="Headline totals" className="mb-6">
-          {summary.status === "fulfilled" ? (
-            <Kpis res={summary.value} monthly={monthly} />
-          ) : (
-            <ErrorNote what="headline totals" reason={summary.reason} />
-          )}
+          <Suspense fallback={<Loading message="Loading totals…" />}>
+            <KpiPanel summary={summary} trend={trendP} />
+          </Suspense>
         </section>
 
         {/* Monthly trend + breakdown */}
@@ -379,26 +394,14 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
             >
               <Legend withPrior />
             </PanelHead>
-            {trend.status === "fulfilled" ? (
-              <ComboChart
-                ariaLabel={`Revenue, expenses and net by month for ${year}, with prior-year net`}
+            <Suspense fallback={<Loading message="Loading monthly trend…" />}>
+              <TrendPanel
+                trend={trendP}
+                year={year}
+                quarter={quarter}
                 currency={currency}
-                cats={monthly.map((p, i) => ({
-                  key: p.period,
-                  label: p.label,
-                  faded: !p.isClosed,
-                  highlight:
-                    !!quarter && i >= (quarter - 1) * 3 && i < quarter * 3,
-                }))}
-                revenue={monthly.map((p) => toNum(p.revenue))}
-                expense={monthly.map((p) => toNum(p.expense))}
-                net={monthly.map((p) => toNum(p.net))}
-                netPrior={monthly.map((p) => toNum(p.priorYear?.net))}
-                empty="No postings for this year yet."
               />
-            ) : (
-              <ErrorNote what="the monthly trend" reason={trend.reason} />
-            )}
+            </Suspense>
           </section>
 
           <section className={panel} aria-labelledby="bd-h">
@@ -417,11 +420,9 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
                 }))}
               />
             </PanelHead>
-            {breakdown.status === "fulfilled" ? (
-              <Breakdown res={breakdown.value} type={bd} />
-            ) : (
-              <ErrorNote what="the breakdown" reason={breakdown.reason} />
-            )}
+            <Suspense fallback={<Loading message="Loading categories…" />}>
+              <BreakdownPanel data={breakdownP} type={bd} />
+            </Suspense>
           </section>
         </div>
 
@@ -449,13 +450,98 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
               reason={(yearly[0] as PromiseRejectedResult).reason}
             />
           ) : (
-            <p className={`py-8 text-center text-sm ${muted}`}>
-              No history yet for the last {YEARS_BACK} years.
-            </p>
+            <EmptyState
+              title="No history yet"
+              message={`Nothing is recorded for the last ${YEARS_BACK} years.`}
+            />
           )}
         </section>
       </main>
     </div>
+  );
+}
+
+/* ---------- streamed panels ---------- */
+
+// A period with no figures, shown through the same path as an API "not available".
+function unavailable<T>(message: string): PromiseSettledResult<T> {
+  return {
+    status: "rejected",
+    reason: new ApiError(404, "DATA_NOT_AVAILABLE", message),
+  };
+}
+
+// Starts a request without letting a failure reject; the panel shows the error.
+function settled<T>(p: Promise<T>): Promise<PromiseSettledResult<T>> {
+  return p.then(
+    (value) => ({ status: "fulfilled", value }) as PromiseFulfilledResult<T>,
+    (reason: unknown) => ({ status: "rejected", reason }) as PromiseRejectedResult,
+  );
+}
+
+async function KpiPanel({
+  summary,
+  trend,
+}: {
+  summary: PromiseSettledResult<SummaryResponse>;
+  trend: Promise<PromiseSettledResult<TrendResponse>>;
+}) {
+  const t = await trend;
+  const monthly = t.status === "fulfilled" ? t.value.data : [];
+  return summary.status === "fulfilled" ? (
+    <Kpis res={summary.value} monthly={monthly} />
+  ) : (
+    <ErrorNote what="headline totals" reason={summary.reason} />
+  );
+}
+
+async function TrendPanel({
+  trend,
+  year,
+  quarter,
+  currency,
+}: {
+  trend: Promise<PromiseSettledResult<TrendResponse>>;
+  year: number;
+  quarter: number | undefined;
+  currency: string;
+}) {
+  const t = await trend;
+  if (t.status !== "fulfilled") {
+    return <ErrorNote what="the monthly trend" reason={t.reason} />;
+  }
+  const monthly = t.value.data;
+  return (
+    <ComboChart
+      ariaLabel={`Revenue, expenses and net by month for ${year}, with prior-year net`}
+      currency={currency}
+      cats={monthly.map((p, i) => ({
+        key: p.period,
+        label: p.label,
+        faded: !p.isClosed,
+        highlight: !!quarter && i >= (quarter - 1) * 3 && i < quarter * 3,
+      }))}
+      revenue={monthly.map((p) => toNum(p.revenue))}
+      expense={monthly.map((p) => toNum(p.expense))}
+      net={monthly.map((p) => toNum(p.net))}
+      netPrior={monthly.map((p) => toNum(p.priorYear?.net))}
+      empty="No postings for this year yet."
+    />
+  );
+}
+
+async function BreakdownPanel({
+  data,
+  type,
+}: {
+  data: Promise<PromiseSettledResult<BreakdownResponse>>;
+  type: BreakdownType;
+}) {
+  const b = await data;
+  return b.status === "fulfilled" ? (
+    <Breakdown res={b.value} type={type} />
+  ) : (
+    <ErrorNote what="the breakdown" reason={b.reason} />
   );
 }
 
@@ -749,9 +835,7 @@ function ComboChart(props: {
     (v): v is number => v !== null,
   );
   if (!cats.length || !vals.length) {
-    return (
-      <p className={`py-10 text-center text-sm ${muted}`}>{props.empty}</p>
-    );
+    return <EmptyState title="No data yet" message={props.empty} />;
   }
 
   const padL = 84,
@@ -1057,9 +1141,10 @@ function Breakdown({
   const cur = res.currency;
   if (!res.data.length) {
     return (
-      <p className={`py-10 text-center text-sm ${muted}`}>
-        No {type} recorded for this period.
-      </p>
+      <EmptyState
+        title={`No ${type} recorded`}
+        message="There are no postings for this period."
+      />
     );
   }
   const maxShare = Math.max(...res.data.map((r) => toNum(r.sharePct) ?? 0), 1);
@@ -1115,20 +1200,27 @@ function Breakdown({
 
 /* ---------- errors ---------- */
 
+// A period that is still open (or has no data) is an empty state, not a failure.
+// Anything else is an error state.
 function ErrorNote({ what, reason }: { what: string; reason: unknown }) {
-  const isApi = reason instanceof ApiError;
-  return (
-    <div
-      role="alert"
-      className="rounded-xl border border-negative/40 bg-negative/10 px-4 py-3 text-sm"
-    >
-      <AlertCircle aria-hidden className="mr-2 inline size-4 align-[-3px] text-negative" />
-      <strong>Couldn’t load {what}.</strong>{" "}
-      {isApi
-        ? reason.code === "DATA_NOT_AVAILABLE"
-          ? `${reason.message} Pick an earlier period.`
-          : reason.message
-        : "Check that the API is running and DART_API_URL is set."}
-    </div>
+  if (reason instanceof ApiError && reason.code === "DATA_NOT_AVAILABLE") {
+    return (
+      <EmptyState
+        title="Not available yet"
+        message={`${reason.message} Pick an earlier period.`}
+      />
+    );
+  }
+  return reason instanceof ApiError ? (
+    <ErrorState
+      statusCode={reason.status}
+      title={`Couldn’t load ${what}`}
+      message={reason.message}
+    />
+  ) : (
+    <ErrorState
+      title={`Couldn’t load ${what}`}
+      message="Check that the API is running and DART_API_URL is set."
+    />
   );
 }
