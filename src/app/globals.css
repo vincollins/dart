@@ -1,11 +1,12 @@
 @import "tailwindcss";
 
-/* DART V2 · CPF brand colours (Figma token sheet). These don't change between themes. */
+/* DART V2 · CPF brand colours (Figma token sheet), refined to a deeper, less
+   neon tone while staying recognisably on-brand. Constant across themes. */
 @theme {
-  --color-primary: #06abd3;
-  --color-secondary: #d51167;
-  --color-accent: #e1c51a;
-  --color-blue: #076fca;
+  --color-primary: #0e8fae;
+  --color-secondary: #b8185c;
+  --color-accent: #c9a227;
+  --color-blue: #0a5fae;
 
   /* Theme-aware surfaces, resolved from the variables below */
   --color-page: var(--theme-page);
@@ -18,20 +19,21 @@
   --color-negative: var(--theme-negative);
 
   --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
 }
 
-/* Light theme (default, from Figma) */
+/* Light theme — warm neutral "paper" base for a calmer, more editorial feel. */
 :root {
   --theme-page: #f7f7f7;
   --theme-surface: #ffffff;
   --theme-hover: #f1f3f5;
-  --theme-ink: #212121;
-  --theme-muted: #5f6368;
-  --theme-line: rgb(16 24 40 / 0.08);
+  --theme-ink: #211f1b;
+  --theme-muted: #6b6760;
+  --theme-line: rgb(42 34 24 / 0.1);
   --theme-positive: #15803d;
   --theme-negative: #b91c1c;
   --theme-lift:
-    0 1px 2px rgb(16 24 40 / 0.06), 0 6px 16px -6px rgb(16 24 40 / 0.14);
+    0 1px 2px rgb(42 34 24 / 0.06), 0 6px 16px -6px rgb(42 34 24 / 0.14);
   color-scheme: light;
 }
 
@@ -41,9 +43,9 @@
     --theme-page: #030619;
     --theme-surface: #0f172a;
     --theme-hover: #17213a;
-    --theme-ink: #e8eef7;
-    --theme-muted: #8fa8c2;
-    --theme-line: rgb(148 180 220 / 0.12);
+    --theme-ink: #efe9df;
+    --theme-muted: #a69f92;
+    --theme-line: rgb(222 210 190 / 0.12);
     --theme-positive: #4ade80;
     --theme-negative: #f87171;
     --theme-lift:
@@ -57,9 +59,9 @@
   --theme-page: #030619;
   --theme-surface: #0f172a;
   --theme-hover: #17213a;
-  --theme-ink: #e8eef7;
-  --theme-muted: #8fa8c2;
-  --theme-line: rgb(148 180 220 / 0.12);
+  --theme-ink: #efe9df;
+  --theme-muted: #a69f92;
+  --theme-line: rgb(222 210 190 / 0.12);
   --theme-positive: #4ade80;
   --theme-negative: #f87171;
   --theme-lift:

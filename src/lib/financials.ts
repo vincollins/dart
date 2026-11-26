@@ -96,12 +96,17 @@ export class ApiError extends Error {
 
 type Params = Record<string, string | number | boolean | null | undefined>;
 
-async function get<T>(path: string, params: Params): Promise<T> {
+async function get<T>(
+  path: string,
+  params: Params,
+  // Most endpoints live under /financials; a few (e.g. /companies) sit at the API root.
+  prefix = "/financials",
+): Promise<T> {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
   }
-  const res = await fetch(`${API_BASE}/financials${path}?${qs}`, {
+  const res = await fetch(`${API_BASE}${prefix}${path}?${qs}`, {
     cache: "no-store",
     headers: {
       Accept: "application/json",
@@ -125,19 +130,32 @@ async function get<T>(path: string, params: Params): Promise<T> {
 
 export type PeriodQuery = { year: number; quarter?: number; month?: number };
 
-export const getSummary = (p: PeriodQuery) =>
-  get<SummaryResponse>("/summary", p);
+// A single selected company id, or undefined for the whole CPF Group (all companies).
+export type CompanyId = string | undefined;
+
+export type Company = { id: string; name: string; shortName: string };
+export const getCompanies = () =>
+  get<{ data: Company[] }>("/companies", {}, "").then((r) => r.data);
+
+export const getSummary = (p: PeriodQuery, companyId?: CompanyId) =>
+  get<SummaryResponse>("/summary", { ...p, companyIds: companyId });
 
 export const getTrend = (
   year: number,
   granularity: "month" | "quarter" = "month",
   includePriorYear = false,
+  companyId?: CompanyId,
 ) =>
   get<TrendResponse>("/trend", {
     year,
     granularity,
     includePriorYear: includePriorYear || undefined,
+    companyIds: companyId,
   });
 
-export const getBreakdown = (type: BreakdownType, p: PeriodQuery, top = 8) =>
-  get<BreakdownResponse>("/breakdown", { type, top, ...p });
+export const getBreakdown = (
+  type: BreakdownType,
+  p: PeriodQuery,
+  top = 8,
+  companyId?: CompanyId,
+) => get<BreakdownResponse>("/breakdown", { type, top, ...p, companyIds: companyId });

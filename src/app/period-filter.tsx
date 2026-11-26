@@ -16,14 +16,18 @@ const focus =
 // server-rendered dashboard. No Apply button is needed.
 export function PeriodFilter({
   bd,
+  company,
   year,
   quarter,
+  companies,
   years,
   quarters,
 }: {
   bd: string;
+  company: string;
   year: string;
   quarter: string;
+  companies: FilterOption[];
   years: FilterOption[];
   quarters: FilterOption[];
 }) {
@@ -31,9 +35,15 @@ export function PeriodFilter({
     <form
       method="get"
       aria-label="Period filters"
-      className="grid w-full grid-cols-2 gap-3 sm:flex sm:w-auto"
+      className="grid w-full grid-cols-2 items-end gap-3 sm:flex sm:w-auto"
     >
       <input type="hidden" name="bd" value={bd} />
+      <FilterSelect
+        label="Company"
+        name="company"
+        value={company}
+        options={companies}
+      />
       <FilterSelect
         label="Year"
         name="year"
@@ -62,8 +72,8 @@ function FilterSelect({
   options: FilterOption[];
 }) {
   return (
-    <label className="flex min-w-0 flex-col gap-1 sm:w-40">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-muted">
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="flex h-4 items-end whitespace-nowrap pl-2 text-[11px] font-medium uppercase leading-none tracking-wide text-muted">
         {label}
       </span>
       <span className="relative">
@@ -71,7 +81,7 @@ function FilterSelect({
           name={name}
           defaultValue={value}
           onChange={(e) => e.currentTarget.form?.requestSubmit()}
-          className={`h-10 w-full appearance-none rounded-lg border border-line bg-surface py-2 pl-3 pr-9 text-sm font-medium text-ink ${focus}`}
+          className={`card-raised h-10 w-full appearance-none sm:w-auto rounded-lg border border-line bg-surface py-2 pl-3 pr-9 text-sm font-medium text-ink ${focus}`}
         >
           {options.map((o) => (
             <option

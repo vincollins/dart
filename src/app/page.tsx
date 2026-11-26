@@ -1,27 +1,24 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import {
-  ArrowDownRight,
-  ArrowUpRight,
-  Landmark,
-  Percent,
-  TrendingUp,
-  Wallet,
-} from "lucide-react";
+import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { PeriodFilter } from "./period-filter";
 import ErrorState from "../components/ErrorState";
 import EmptyState from "../components/EmptyState";
 import Loading from "../components/Loading";
+import QuarterNotice from "../components/QuarterNotice";
 import { connection } from "next/server";
 import {
   ApiError,
   getBreakdown,
-  getSummary,
+  getCompanies,
   getTrend,
   toNum,
   type BreakdownResponse,
   type BreakdownType,
+  type Company,
+  type CompanyId,
   type Num,
+  type SummaryData,
   type SummaryResponse,
   type TrendResponse,
 } from "../lib/financials";
@@ -37,18 +34,20 @@ const panel =
   "card-raised min-w-0 rounded-xl border border-line bg-surface p-5 sm:p-6";
 const muted = "text-muted";
 const focus =
-  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#28ADDB]";
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary";
 
 /* ---------- formatting ---------- */
 
-function money(v: Num, currency: string, compact = false) {
+function money(v: Num, currency: string, compact = false, decimals?: number) {
   const n = toNum(v);
   if (n === null) return "—";
+  const fraction = decimals ?? (compact ? 1 : 0);
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
     notation: compact ? "compact" : "standard",
-    maximumFractionDigits: compact ? 1 : 0,
+    minimumFractionDigits: fraction,
+    maximumFractionDigits: fraction,
   }).format(n);
 }
 
@@ -201,6 +200,14 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
   const thisYear = new Date().getFullYear();
   const bd: BreakdownType = one(sp.bd) === "revenue" ? "revenue" : "expense";
 
+  // Company filter. Fetch the list up front; an unknown/absent id means the
+  // whole CPF Group (all companies), which the API returns when companyIds is omitted.
+  const companies = await getCompanies().catch(() => [] as Company[]);
+  const companyParam = one(sp.company);
+  const companyId = companies.some((c) => c.id === companyParam)
+    ? companyParam
+    : undefined;
+
   // Step 1: quarterly trend for recent years. Feeds the year-over-year panel
   // and tells us which periods are closed, so the default never asks for an open one.
   const yearList = Array.from(
@@ -208,7 +215,7 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
     (_, i) => thisYear - YEARS_BACK + 1 + i,
   );
   const yearly = await Promise.allSettled(
-    yearList.map((y) => getTrend(y, "quarter")),
+    yearList.map((y) => getTrend(y, "quarter", false, companyId)),
   );
   const rows = yearly
     .map((r, i) =>
@@ -219,46 +226,60 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
 
   // Latest closed quarter across all years, used when no period is in the URL.
   const latest = [...rows].reverse().find((r) => r.closedThrough > 0);
-  const bestQuarterFor = (r: YearRow | undefined) =>
-    r && !r.complete && r.closedThrough ? r.closedThrough : undefined;
+  const thisQuarter = Math.floor(new Date().getMonth() / 3) + 1;
+  // Default quarter for a year: the in-progress quarter for the current year,
+  // Q4 for a finished year (cumulative Q4 covers the whole year), otherwise the
+  // last closed quarter. There is no separate "full year" option.
+  const defaultQuarterFor = (r: YearRow | undefined) =>
+    !r
+      ? undefined
+      : r.year === thisYear
+        ? thisQuarter
+        : r.complete
+          ? 4
+          : r.closedThrough || undefined;
 
   const yearParam = Number(one(sp.year));
   const year = yearParam || latest?.year || thisYear;
   const quarterRaw = Number(one(sp.quarter));
-  const quarter = yearParam
-    ? quarterRaw >= 1 && quarterRaw <= 4
-      ? quarterRaw
-      : undefined
-    : latest
-      ? latest.complete
-        ? undefined
-        : latest.closedThrough
-      : undefined;
+  const explicitQuarter =
+    quarterRaw >= 1 && quarterRaw <= 4 ? quarterRaw : undefined;
+  const quarter =
+    explicitQuarter ?? defaultQuarterFor(rowFor(year)) ?? thisQuarter;
   const period = { year, quarter };
 
-  // Periods with no figures yet (a quarter still open, or a year outside the
-  // window) are not requested. They render as "not available" empty states.
-  const selectedRow = rowFor(year);
-  const quarterOpen =
-    !!quarter &&
-    !!selectedRow &&
-    !selectedRow.quarters.find((x) => x.q === quarter)?.closed;
-  const noFigures = !yearList.includes(year) || quarterOpen;
-  const noFiguresMsg = !yearList.includes(year)
-    ? `There is no data for ${year}.`
-    : `${quarter ? `Q${quarter} ${year}` : year} isn’t closed yet.`;
+  // The monthly trend drives both the availability check and the cumulative
+  // (Q1..Qn) headline totals, so it is fetched first. A quarter is available as
+  // soon as any of its own months has data — even while the quarter is still
+  // open — so the current quarter shows the months that have arrived so far.
+  const inWindow = yearList.includes(year);
+  const monthly: PromiseSettledResult<TrendResponse> | null = inWindow
+    ? await settled(getTrend(year, "month", true, companyId))
+    : null;
+  const monthData = monthly?.status === "fulfilled" ? monthly.value.data : [];
+  const monthHasData = (i: number) =>
+    i < monthData.length &&
+    (toNum(monthData[i].revenue) !== null ||
+      toNum(monthData[i].expense) !== null);
+  const quarterEmpty =
+    monthly?.status === "fulfilled" &&
+    ![0, 1, 2].some((k) => monthHasData((quarter - 1) * 3 + k));
+  const noFigures = !inWindow || quarterEmpty;
+  const noFiguresMsg = inWindow
+    ? `Q${quarter} ${year} has no data yet.`
+    : `There is no data for ${year}.`;
 
-  // Step 2: the period summary is awaited (it sets the title and currency).
-  // The monthly trend and breakdown start now and stream into their own panels.
-  const trendP = noFigures
+  // The headline totals are cumulative (Q1..Qn) from the monthly trend. The
+  // breakdown stays per selected quarter and streams into its own panel.
+  const trendP: Promise<PromiseSettledResult<TrendResponse>> = noFigures
     ? Promise.resolve(unavailable<TrendResponse>(noFiguresMsg))
-    : settled(getTrend(year, "month", true));
+    : Promise.resolve(monthly!);
   const breakdownP = noFigures
     ? Promise.resolve(unavailable<BreakdownResponse>(noFiguresMsg))
-    : settled(getBreakdown(bd, period, 3));
+    : settled(getBreakdown(bd, period, 3, companyId));
   const summary: PromiseSettledResult<SummaryResponse> = noFigures
     ? unavailable<SummaryResponse>(noFiguresMsg)
-    : await settled(getSummary(period));
+    : cumulativeSummary(monthly!, year, quarter);
 
   const firstOk = [summary, ...yearly].find(
     (r) => r.status === "fulfilled",
@@ -266,21 +287,38 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
     | PromiseFulfilledResult<{ currency: string; dataAsOf: string | null }>
     | undefined;
   const currency = firstOk?.value.currency ?? "USD";
-  const asOf = firstOk?.value.dataAsOf ?? null;
 
   const href = (patch: {
     year?: number;
     quarter?: number | null;
     bd?: BreakdownType;
+    company?: CompanyId;
   }) => {
     const q = new URLSearchParams();
     const y = patch.year ?? year;
     const qq = patch.quarter === undefined ? quarter : patch.quarter;
+    const co = patch.company === undefined ? companyId : patch.company;
     q.set("year", String(y));
     if (qq) q.set("quarter", String(qq));
     q.set("bd", patch.bd ?? bd);
+    if (co) q.set("company", co);
     return `?${q}`;
   };
+
+  // The selected quarter is still in progress when one of its months has data
+  // but another of its months has not closed yet. Data-driven, so it works for
+  // any open quarter in any year and clears automatically once the quarter closes.
+  const qMonths = [0, 1, 2].map((k) => (quarter - 1) * 3 + k);
+  const inProgress =
+    !noFigures &&
+    monthly?.status === "fulfilled" &&
+    qMonths.some((i) => monthHasData(i)) &&
+    qMonths.some(
+      (i) =>
+        i >= monthData.length ||
+        monthData[i].isClosed === false ||
+        !monthHasData(i),
+    );
 
   // The selected year is always an option, so an out-of-window year is not
   // silently replaced by the first year in the list.
@@ -292,29 +330,30 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
       key: String(y),
       label: String(y),
       current: y === year,
-      href: href({ year: y, quarter: bestQuarterFor(rowFor(y)) ?? null }),
+      href: href({ year: y, quarter: defaultQuarterFor(rowFor(y)) ?? null }),
     }),
   );
-  const quarterItems = [
-    {
-      key: "fy",
-      label: "Full year",
-      current: !quarter,
-      href: href({ quarter: null }),
-      disabledReason:
-        selectedRow && !selectedRow.complete
-          ? `${year} isn’t closed yet`
-          : undefined,
-    },
-    // Every quarter can be picked; an open one shows the "not available" state.
-    ...[1, 2, 3, 4].map((q) => ({
-      key: `q${q}`,
-      label: `Q${q}`,
-      current: quarter === q,
-      href: href({ quarter: q }),
-      disabledReason: undefined as string | undefined,
-    })),
+  // Every quarter is cumulative (Q1..Qn), so Q4 already covers the full year and
+  // there is no separate "full year" option. An empty quarter shows "not available".
+  const quarterItems = [1, 2, 3, 4].map((q) => ({
+    key: `q${q}`,
+    label: `Q${q}`,
+    current: quarter === q,
+    href: href({ quarter: q }),
+  }));
+  // Display short name, with local overrides for how we prefer to label companies.
+  const shortNameOverrides: Record<string, string> = { CPFCA: "CPF C&A" };
+  const shortNameOf = (c: Company) => shortNameOverrides[c.id] ?? c.shortName;
+  // "CPF Group" (all companies) is the default; each company filters to its own data.
+  const companyItems = [
+    { value: "", label: "CPF Group" },
+    ...companies.map((c) => ({ value: c.id, label: shortNameOf(c) })),
   ];
+  // Headline reflects the selected company (or the whole group) + "Financials".
+  const selectedCompany = companies.find((c) => c.id === companyId);
+  const companyLabel = selectedCompany
+    ? shortNameOf(selectedCompany)
+    : "CPF Group";
 
 
   return (
@@ -326,7 +365,7 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
           alt="Dart"
           className="size-8 rounded-lg object-cover shadow-sm ring-1 ring-inset ring-line"
         />
-        <span className="text-base font-semibold">Dart</span>
+        <span className="font-serif text-lg font-semibold">Dart</span>
         <span className="mx-1 h-5 w-px bg-line" />
         <span className="text-sm text-muted">Financial Reporting</span>
       </div>
@@ -334,44 +373,43 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
         {/* Header + period controls */}
         <header className="mb-8 flex flex-wrap items-end justify-between gap-x-10 gap-y-5">
           <div>
-            <h1 className="text-3xl font-semibold tracking-tight lg:text-4xl">
-              {summary.status === "fulfilled"
-                ? summary.value.data.periodLabel
-                : quarter
-                  ? `Q${quarter} ${year}`
-                  : year}
+            <h1 className="font-serif text-3xl font-semibold tracking-tight lg:text-4xl">
+              {companyLabel} Financials
             </h1>
             <p className={`mt-1.5 text-sm ${muted}`}>
               Financial overview
               {summary.status === "fulfilled" && (
                 <>, compared with {summary.value.data.comparison.label}</>
               )}
-              {asOf && (
-                <>
-                  . Data as of{" "}
-                  {new Date(asOf).toLocaleDateString(undefined, {
-                    dateStyle: "medium",
-                  })}
-                  .
-                </>
-              )}
+              {/* Live "as of" date: the exact day the page is viewed, updates daily. */}
+              . Data as of{" "}
+              {new Date().toLocaleDateString(undefined, {
+                dateStyle: "medium",
+              })}
+              .
             </p>
           </div>
           <PeriodFilter
             // Remount when the period changes so the dropdowns show the new value.
-            key={`${year}-${quarter ?? "fy"}-${bd}`}
+            key={`${companyId ?? "all"}-${year}-${quarter}-${bd}`}
             bd={bd}
+            company={companyId ?? ""}
             year={String(year)}
-            quarter={quarter ? String(quarter) : ""}
+            quarter={String(quarter)}
+            companies={companyItems}
             years={yearItems.map((y) => ({ value: y.key, label: y.label }))}
             quarters={quarterItems.map((q) => ({
-              value: q.key === "fy" ? "" : q.label.slice(1),
-              label: q.label === "Full year" ? "All" : q.label,
-              disabled: !!q.disabledReason && !q.current,
-              title: q.disabledReason,
+              value: q.label.slice(1),
+              label: q.label,
             }))}
           />
         </header>
+
+        {inProgress && (
+          <div className="mb-6">
+            <QuarterNotice quarter={quarter} year={year} />
+          </div>
+        )}
 
         {/* KPI strip */}
         <section aria-label="Headline totals" className="mb-6">
@@ -386,13 +424,14 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
             <PanelHead
               id="trend-h"
               title={`Month by month, ${year}`}
+              classic
               note={
                 quarter
                   ? `Q${quarter} is shaded. Faded months are still open.`
                   : "Faded months are still open."
               }
             >
-              <Legend withPrior />
+              <Legend withPrior classic />
             </PanelHead>
             <Suspense fallback={<Loading message="Loading monthly trend…" />}>
               <TrendPanel
@@ -407,14 +446,14 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
           <section className={panel} aria-labelledby="bd-h">
             <PanelHead
               id="bd-h"
-              title={`Largest ${bd === "expense" ? "expense" : "revenue"} categories`}
+              title={`Largest ${bd === "expense" ? "cost" : "revenue"} categories`}
             >
               <Segmented
                 label="Breakdown type"
                 size="sm"
                 items={(["expense", "revenue"] as const).map((t) => ({
                   key: t,
-                  label: t === "expense" ? "Expenses" : "Revenue",
+                  label: t === "expense" ? "Costs" : "Revenue",
                   current: bd === t,
                   href: href({ bd: t }),
                 }))}
@@ -441,7 +480,7 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
               selectedYear={year}
               currency={currency}
               href={(y) =>
-                href({ year: y, quarter: bestQuarterFor(rowFor(y)) ?? null })
+                href({ year: y, quarter: defaultQuarterFor(rowFor(y)) ?? null })
               }
             />
           ) : yearly.every((r) => r.status === "rejected") ? (
@@ -468,6 +507,62 @@ function unavailable<T>(message: string): PromiseSettledResult<T> {
   return {
     status: "rejected",
     reason: new ApiError(404, "DATA_NOT_AVAILABLE", message),
+  };
+}
+
+// Cumulative (Q1..Qn) headline totals built from the monthly trend: every month
+// that has data from January through the end of the selected quarter is summed,
+// so Q3 = Jan–Sep and the current open quarter includes the months so far. The
+// comparison uses the same months a year earlier.
+function cumulativeSummary(
+  trend: PromiseSettledResult<TrendResponse>,
+  year: number,
+  quarter: number,
+): PromiseSettledResult<SummaryResponse> {
+  if (trend.status !== "fulfilled") return trend;
+  const months = trend.value.data.slice(0, quarter * 3);
+  const sum = (pick: (p: TrendResponse["data"][number]) => Num | undefined) => {
+    let total = 0;
+    let any = false;
+    for (const m of months) {
+      const n = toNum(pick(m));
+      if (n !== null) {
+        total += n;
+        any = true;
+      }
+    }
+    return any ? total : null;
+  };
+  const revenue = sum((p) => p.revenue);
+  const expense = sum((p) => p.expense);
+  const net = sum((p) => p.net);
+  const data: SummaryData = {
+    periodLabel: `Q${quarter} ${year}`,
+    revenue,
+    expense,
+    net,
+    netMarginPct: revenue ? ((net ?? 0) / revenue) * 100 : null,
+    comparison: {
+      label:
+        quarter === 1
+          ? `Q1 ${year - 1}`
+          : `Q1–Q${quarter} ${year - 1}`,
+      revenue: sum((p) => p.priorYear?.revenue),
+      expense: sum((p) => p.priorYear?.expense),
+      net: sum((p) => p.priorYear?.net),
+      revenueChangePct: change(revenue, sum((p) => p.priorYear?.revenue)),
+      expenseChangePct: change(expense, sum((p) => p.priorYear?.expense)),
+      netChangePct: change(net, sum((p) => p.priorYear?.net)),
+    },
+  };
+  return {
+    status: "fulfilled",
+    value: {
+      appliedFilters: { companyIds: [], year, quarter, month: null },
+      currency: trend.value.currency,
+      dataAsOf: trend.value.dataAsOf,
+      data,
+    },
   };
 }
 
@@ -513,7 +608,7 @@ async function TrendPanel({
   const monthly = t.value.data;
   return (
     <ComboChart
-      ariaLabel={`Revenue, expenses and net by month for ${year}, with prior-year net`}
+      ariaLabel={`Revenue, costs and net by month for ${year}, with prior-year net`}
       currency={currency}
       cats={monthly.map((p, i) => ({
         key: p.period,
@@ -605,16 +700,23 @@ function PanelHead({
   title,
   note,
   children,
+  classic = false,
 }: {
   id: string;
   title: string;
   note?: string;
   children?: React.ReactNode;
+  classic?: boolean;
 }) {
   return (
     <div className="mb-5 flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
       <div>
-        <h2 id={id} className="text-base font-semibold">
+        <h2
+          id={id}
+          className={
+            classic ? "text-base font-semibold" : "font-serif text-lg font-semibold"
+          }
+        >
           {title}
         </h2>
         {note && (
@@ -626,19 +728,25 @@ function PanelHead({
   );
 }
 
-function Legend({ withPrior = false }: { withPrior?: boolean }) {
+function Legend({
+  withPrior = false,
+  classic = false,
+}: {
+  withPrior?: boolean;
+  classic?: boolean;
+}) {
   return (
     <ul className={`flex flex-wrap gap-x-4 gap-y-1 text-xs ${muted}`}>
       <li className="flex items-center gap-1.5">
-        <i className="size-2.5 rounded-sm bg-[#28ADDB]" />
+        <i className={`size-2.5 rounded-sm ${classic ? "bg-[#28ADDB]" : "bg-primary"}`} />
         Revenue
       </li>
       <li className="flex items-center gap-1.5">
-        <i className="size-2.5 rounded-sm bg-[#DF0061]" />
-        Expenses
+        <i className={`size-2.5 rounded-sm ${classic ? "bg-[#DF0061]" : "bg-secondary"}`} />
+        Costs
       </li>
       <li className="flex items-center gap-1.5">
-        <i className="h-0.5 w-4 bg-accent" />
+        <i className={`h-0.5 w-4 ${classic ? "bg-accent" : "bg-ink"}`} />
         Net
       </li>
       {withPrior && (
@@ -654,16 +762,27 @@ function Legend({ withPrior = false }: { withPrior?: boolean }) {
 function Sparkline({
   values,
   className,
+  color,
+  gradId,
+  marker = true,
 }: {
   values: (number | null)[];
   className: string;
+  // CSS colour for the shaded area (e.g. "var(--color-primary)"). The area fades
+  // from this colour at the line down to transparent at the baseline.
+  color?: string;
+  // Unique id for this sparkline's gradient definition.
+  gradId?: string;
+  marker?: boolean;
 }) {
   const pts = values
     .map((v, i) => ({ v, i }))
     .filter((p): p is { v: number; i: number } => p.v !== null);
   if (pts.length < 2) return null;
-  const W = 96,
-    H = 32,
+  // Wide, aspect-locked viewBox: the SVG scales with the card width without
+  // distorting the line or the end marker.
+  const W = 240,
+    H = 40,
     pad = 3;
   const lo = Math.min(...pts.map((p) => p.v));
   const hi = Math.max(...pts.map((p) => p.v));
@@ -675,11 +794,24 @@ function Sparkline({
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      width={W}
-      height={H}
       aria-hidden
-      className="shrink-0 overflow-visible"
+      className="block h-auto w-full overflow-visible"
     >
+      {color && gradId && (
+        <>
+          <defs>
+            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.35} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <path
+            d={`${d} L${x(last.i)},${H} L${x(pts[0].i)},${H} Z`}
+            fill={`url(#${gradId})`}
+            stroke="none"
+          />
+        </>
+      )}
       <path
         d={d}
         fill="none"
@@ -688,12 +820,14 @@ function Sparkline({
         strokeLinecap="round"
         className={className}
       />
-      <circle
-        cx={x(last.i)}
-        cy={y(last.v)}
-        r={2.5}
-        className={className.replace(/stroke-/g, "fill-")}
-      />
+      {marker && (
+        <circle
+          cx={x(last.i)}
+          cy={y(last.v)}
+          r={2.5}
+          className={className.replace(/stroke-/g, "fill-")}
+        />
+      )}
     </svg>
   );
 }
@@ -719,19 +853,21 @@ function Kpis({
       up: true,
       spark: monthly.map((p) => toNum(p.revenue)),
       stroke: "stroke-primary",
-      Icon: TrendingUp,
-      tile: "bg-primary/10 text-primary",
+      color: "var(--color-primary)",
+      gradId: "spark-revenue",
+      marker: false,
     },
     {
-      label: "Expenses",
+      label: "Costs",
       value: money(d.expense, cur),
       change: c.expenseChangePct,
       prior: c.expense,
       up: false,
       spark: monthly.map((p) => toNum(p.expense)),
       stroke: "stroke-secondary",
-      Icon: Wallet,
-      tile: "bg-secondary/10 text-secondary",
+      color: "var(--color-secondary)",
+      gradId: "spark-expenses",
+      marker: false,
     },
     {
       label: "Net result",
@@ -741,8 +877,9 @@ function Kpis({
       up: true,
       spark: monthly.map((p) => toNum(p.net)),
       stroke: "stroke-accent",
-      Icon: Landmark,
-      tile: "bg-blue/10 text-blue",
+      color: "var(--color-accent)",
+      gradId: "spark-net",
+      marker: false,
     },
   ];
   return (
@@ -752,45 +889,38 @@ function Kpis({
           key={k.label}
           className="card-raised flex min-w-0 flex-col rounded-xl border border-line bg-surface p-5 sm:p-6"
         >
-          <div className="flex items-center gap-3">
-            <span
-              className={`grid size-9 shrink-0 place-items-center rounded-lg shadow-sm ring-1 ring-inset ring-line ${k.tile}`}
-            >
-              <k.Icon aria-hidden className="size-4.5" />
-            </span>
-            <dt className={`text-xs font-medium uppercase tracking-wide ${muted}`}>
-              {k.label}
-            </dt>
-            <span className="ml-auto">
-              <Sparkline values={k.spark} className={k.stroke} />
-            </span>
-          </div>
-          <dd className="mt-5 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
+          <dt className={`text-xs font-medium uppercase tracking-wide ${muted}`}>
+            {k.label}
+          </dt>
+          <dd className="mt-2 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
             {k.value}
           </dd>
+          <div className="mt-4 px-2">
+            <Sparkline
+              values={k.spark}
+              className={k.stroke}
+              color={k.color}
+              gradId={k.gradId}
+              marker={k.marker}
+            />
+          </div>
           <dd
-            className={`mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line pt-4 text-xs ${muted}`}
+            className={`mt-4 flex flex-nowrap items-center gap-x-1.5 border-t border-line pt-4 text-[11px] tabular-nums ${muted}`}
           >
-            <Delta v={k.change} goodWhenUp={k.up} pill />
-            <span>
-              vs {c.label}{" "}
-              <span className="whitespace-nowrap">
-                ({money(k.prior, cur, true)})
-              </span>
+            <span className="shrink-0">
+              <Delta v={k.change} goodWhenUp={k.up} pill />
+            </span>
+            <span className="min-w-0 truncate whitespace-nowrap">
+              vs {c.label} ({money(k.prior, cur, true, 2)})
             </span>
           </dd>
         </div>
       ))}
       <div className="card-raised flex flex-col rounded-xl border border-line bg-surface p-5 sm:p-6">
-        <div className="flex items-center gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-accent/20 text-ink shadow-sm ring-1 ring-inset ring-line">
-            <Percent aria-hidden className="size-4.5" />
-          </span>
-          <dt className={`text-xs font-medium uppercase tracking-wide ${muted}`}>
-            Net margin
-          </dt>
-        </div>
-        <dd className="mt-5 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
+        <dt className={`text-xs font-medium uppercase tracking-wide ${muted}`}>
+          Net margin
+        </dt>
+        <dd className="mt-2 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
           {pct(d.netMarginPct)}
         </dd>
         <dd
@@ -819,6 +949,9 @@ function ComboChart(props: {
   height?: number;
   width?: number;
   maxBar?: number;
+  // brand = the refined Year-over-year styling (smooth white-ink net line,
+  // stronger selected-year band). Off = the original monthly chart styling.
+  brand?: boolean;
 }) {
   const {
     cats,
@@ -830,7 +963,13 @@ function ComboChart(props: {
     height: H = 300,
     width: W = 760,
     maxBar = 16,
+    brand = false,
   } = props;
+  const smooth = brand;
+  const netStroke = brand ? "stroke-ink" : "stroke-accent";
+  const emphasizeHighlight = brand;
+  const cRevenue = brand ? "fill-primary" : "fill-[#28ADDB]";
+  const cExpense = brand ? "fill-secondary" : "fill-[#DF0061]";
   const vals = [...revenue, ...expense, ...net, ...netPrior].filter(
     (v): v is number => v !== null,
   );
@@ -853,12 +992,31 @@ function ComboChart(props: {
   const ticks = Array.from({ length: 5 }, (_, i) => min + (span * i) / 4);
   const axis = "fill-muted text-[11px]";
 
-  const line = (series: (number | null)[]) =>
-    series
-      .map((v, i) => (v === null ? null : { i, v }))
-      .filter((p): p is { i: number; v: number } => p !== null)
-      .map((p, k) => `${k ? "L" : "M"}${cx(p.i)},${y(p.v)}`)
-      .join(" ");
+  // Straight segments by default; optionally a smooth (Catmull-Rom → cubic
+  // Bézier) curve when `smooth` is set (used by the Year-over-year chart only).
+  const line = (series: (number | null)[]) => {
+    const pts = series
+      .map((v, i) => (v === null ? null : { x: cx(i), y: y(v) }))
+      .filter((p): p is { x: number; y: number } => p !== null);
+    if (pts.length === 0) return "";
+    if (pts.length === 1) return `M${pts[0].x},${pts[0].y}`;
+    if (!smooth) {
+      return pts.map((p, k) => `${k ? "L" : "M"}${p.x},${p.y}`).join(" ");
+    }
+    let d = `M${pts[0].x},${pts[0].y}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] ?? pts[i];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[i + 2] ?? p2;
+      const c1x = p1.x + (p2.x - p0.x) / 6;
+      const c1y = p1.y + (p2.y - p0.y) / 6;
+      const c2x = p2.x - (p3.x - p1.x) / 6;
+      const c2y = p2.y - (p3.y - p1.y) / 6;
+      d += ` C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`;
+    }
+    return d;
+  };
 
   const bar = (v: number | null, x: number, cls: string, title: string) =>
     v === null ? null : (
@@ -884,14 +1042,24 @@ function ComboChart(props: {
       >
         {cats.map((c, i) =>
           c.highlight ? (
-            <rect
-              key={`hl-${c.key}`}
-              x={padL + band * i}
-              y={padT}
-              width={band}
-              height={H - padT - padB}
-              className="fill-[#28ADDB]/[0.08]"
-            />
+            <g key={`hl-${c.key}`}>
+              <rect
+                x={padL + band * i}
+                y={padT}
+                width={band}
+                height={H - padT - padB}
+                className={emphasizeHighlight ? "fill-primary/[0.14]" : "fill-[#28ADDB]/[0.08]"}
+              />
+              {emphasizeHighlight && (
+                <rect
+                  x={padL + band * i}
+                  y={padT}
+                  width={band}
+                  height={2.5}
+                  className="fill-primary"
+                />
+              )}
+            </g>
           ) : null,
         )}
         {ticks.map((t) => (
@@ -927,14 +1095,14 @@ function ComboChart(props: {
             {bar(
               revenue[i],
               cx(i) - barW - 1,
-              "fill-[#28ADDB]",
+              cRevenue,
               `${c.label} revenue: ${money(revenue[i], cur)}`,
             )}
             {bar(
               expense[i],
               cx(i) + 1,
-              "fill-[#DF0061]",
-              `${c.label} expenses: ${money(expense[i], cur)}`,
+              cExpense,
+              `${c.label} costs: ${money(expense[i], cur)}`,
             )}
             <text
               x={cx(i)}
@@ -961,7 +1129,8 @@ function ComboChart(props: {
           fill="none"
           strokeWidth={2}
           strokeLinejoin="round"
-          className="stroke-accent"
+          strokeLinecap="round"
+          className={netStroke}
         />
         {net.map((v, i) =>
           v === null ? null : (
@@ -971,7 +1140,7 @@ function ComboChart(props: {
               cy={y(v)}
               r={3.5}
               strokeWidth={2}
-              className="fill-surface stroke-accent"
+              className={`fill-surface ${netStroke}`}
             >
               <title>
                 {`${cats[i].label} net: ${money(v, cur)}${
@@ -1020,15 +1189,18 @@ function YearOverYear({
   return (
     <div className="grid grid-cols-1 gap-8">
       <ComboChart
-        ariaLabel="Revenue, expenses and net by year"
+        ariaLabel="Revenue, costs and net by year"
         currency={cur}
         width={1400}
         height={240}
         maxBar={36}
+        brand
         cats={rows.map((r) => ({
           key: String(r.year),
           label: label(r),
-          faded: !r.complete,
+          // Fade still-open years so they read as partial — but never the
+          // selected year, which must stand out as the one being viewed.
+          faded: !r.complete && r.year !== selectedYear,
           highlight: r.year === selectedYear,
         }))}
         revenue={rows.map((r) => r.revenue)}
@@ -1037,7 +1209,16 @@ function YearOverYear({
         empty="No yearly history yet."
       />
       <div className="-mx-1 overflow-x-auto px-1">
-        <table className="w-full min-w-[480px] text-sm">
+        <table className="w-full min-w-[760px] table-fixed text-sm">
+          <colgroup>
+            <col className="w-[15%]" />
+            <col className="w-[16%]" />
+            <col className="w-[16%]" />
+            <col className="w-[16%]" />
+            <col className="w-[11%]" />
+            <col className="w-[13%]" />
+            <col className="w-[13%]" />
+          </colgroup>
           <thead>
             <tr
               className={`border-b border-line text-left text-xs ${muted}`}
@@ -1048,28 +1229,19 @@ function YearOverYear({
               <th scope="col" className="px-3 py-2 text-right font-medium">
                 Revenue
               </th>
-              <th
-                scope="col"
-                className="hidden px-3 py-2 text-right font-medium md:table-cell"
-              >
-                Expenses
+              <th scope="col" className="px-3 py-2 text-right font-medium">
+                Costs
               </th>
               <th scope="col" className="px-3 py-2 text-right font-medium">
                 Net
               </th>
-              <th
-                scope="col"
-                className="hidden px-3 py-2 text-right font-medium md:table-cell"
-              >
+              <th scope="col" className="px-3 py-2 text-right font-medium">
                 Margin
               </th>
               <th scope="col" className="px-3 py-2 text-right font-medium">
                 Revenue change
               </th>
-              <th
-                scope="col"
-                className="hidden py-2 pl-3 text-right font-medium sm:table-cell"
-              >
+              <th scope="col" className="py-2 pl-3 text-right font-medium">
                 Net change
               </th>
             </tr>
@@ -1097,16 +1269,16 @@ function YearOverYear({
                       </span>
                     )}
                   </th>
-                  <td className="px-3 py-2.5 text-right">
+                  <td className="whitespace-nowrap px-3 py-2.5 text-right">
                     {money(r.revenue, cur)}
                   </td>
-                  <td className="hidden px-3 py-2.5 text-right md:table-cell">
+                  <td className="whitespace-nowrap px-3 py-2.5 text-right">
                     {money(r.expense, cur)}
                   </td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-right font-semibold">
                     {money(r.net, cur)}
                   </td>
-                  <td className="hidden px-3 py-2.5 text-right md:table-cell">
+                  <td className="whitespace-nowrap px-3 py-2.5 text-right">
                     {pct(margin)}
                   </td>
                   <td className="px-3 py-2.5 text-right">
@@ -1114,7 +1286,7 @@ function YearOverYear({
                       <Delta v={revChange} goodWhenUp />
                     </span>
                   </td>
-                  <td className="hidden py-2.5 pl-3 text-right sm:table-cell">
+                  <td className="py-2.5 pl-3 text-right">
                     <span className="inline-flex justify-end">
                       <Delta v={netChange} goodWhenUp />
                     </span>
@@ -1142,13 +1314,13 @@ function Breakdown({
   if (!res.data.length) {
     return (
       <EmptyState
-        title={`No ${type} recorded`}
+        title={`No ${type === "expense" ? "cost" : "revenue"} recorded`}
         message="There are no postings for this period."
       />
     );
   }
   const maxShare = Math.max(...res.data.map((r) => toNum(r.sharePct) ?? 0), 1);
-  const fill = type === "expense" ? "bg-[#DF0061]" : "bg-[#28ADDB]";
+  const fill = type === "expense" ? "bg-secondary" : "bg-primary";
   return (
     <>
       <ol className="grid gap-4">
@@ -1189,7 +1361,7 @@ function Breakdown({
       <p
         className={`mt-5 flex justify-between border-t border-line pt-3 text-sm ${muted}`}
       >
-        <span>Total {type === "expense" ? "expenses" : "revenue"}</span>
+        <span>Total {type === "expense" ? "costs" : "revenue"}</span>
         <strong className="text-ink">
           {money(res.total, cur)}
         </strong>
