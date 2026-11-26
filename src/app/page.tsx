@@ -217,11 +217,12 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
   const yearly = await Promise.allSettled(
     yearList.map((y) => getTrend(y, "quarter", false, companyId)),
   );
-  const rows = yearly
-    .map((r, i) =>
-      r.status === "fulfilled" ? toYearRow(yearList[i], r.value) : null,
-    )
-    .filter((r): r is YearRow => r !== null && r.hasData);
+  // Every year in the window is always listed, even when its data is missing or
+  // its request failed, so the year list never depends on what came back.
+  const emptyTrend = { data: [] } as unknown as TrendResponse;
+  const rows: YearRow[] = yearly.map((r, i) =>
+    toYearRow(yearList[i], r.status === "fulfilled" ? r.value : emptyTrend),
+  );
   const rowFor = (y: number) => rows.find((r) => r.year === y);
 
   // Latest closed quarter across all years, used when no period is in the URL.
@@ -474,7 +475,12 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
           >
             <Legend />
           </PanelHead>
-          {rows.length ? (
+          {yearly.every((r) => r.status === "rejected") ? (
+            <ErrorNote
+              what="the yearly history"
+              reason={(yearly[0] as PromiseRejectedResult).reason}
+            />
+          ) : (
             <YearOverYear
               rows={rows}
               selectedYear={year}
@@ -482,16 +488,6 @@ async function Dashboard({ searchParams }: { searchParams: Promise<SP> }) {
               href={(y) =>
                 href({ year: y, quarter: defaultQuarterFor(rowFor(y)) ?? null })
               }
-            />
-          ) : yearly.every((r) => r.status === "rejected") ? (
-            <ErrorNote
-              what="the yearly history"
-              reason={(yearly[0] as PromiseRejectedResult).reason}
-            />
-          ) : (
-            <EmptyState
-              title="No history yet"
-              message={`Nothing is recorded for the last ${YEARS_BACK} years.`}
             />
           )}
         </section>
@@ -778,12 +774,28 @@ function Sparkline({
   const pts = values
     .map((v, i) => ({ v, i }))
     .filter((p): p is { v: number; i: number } => p.v !== null);
-  if (pts.length < 2) return null;
   // Wide, aspect-locked viewBox: the SVG scales with the card width without
   // distorting the line or the end marker.
   const W = 240,
     H = 40,
     pad = 3;
+  // Not enough data to draw a graph: show a flat horizontal line in the same space.
+  if (pts.length < 2) {
+    const mid = H / 2;
+    return (
+      <svg viewBox={`0 0 ${W} ${H}`} aria-hidden className="block h-auto w-full">
+        <line
+          x1={pad}
+          x2={W - pad}
+          y1={mid}
+          y2={mid}
+          strokeWidth={1.75}
+          strokeLinecap="round"
+          className={className}
+        />
+      </svg>
+    );
+  }
   const lo = Math.min(...pts.map((p) => p.v));
   const hi = Math.max(...pts.map((p) => p.v));
   const x = (i: number) =>
@@ -844,6 +856,21 @@ function Kpis({
   const d = res.data;
   const c = d.comparison;
   const cur = res.currency;
+  // Cost to income = cost ÷ revenue × 100, on the cumulative totals.
+  const ratioOf = (cost: Num | undefined, revenue: Num | undefined) => {
+    const e = toNum(cost);
+    const r = toNum(revenue);
+    return e !== null && r ? (e / r) * 100 : null;
+  };
+  const costToIncome = ratioOf(d.expense, d.revenue);
+  const priorCostToIncome = ratioOf(c.expense, c.revenue);
+  const ptsChange =
+    costToIncome !== null && priorCostToIncome !== null
+      ? costToIncome - priorCostToIncome
+      : null;
+  // Monthly ratio drives the line graph under the value.
+  const ctiSpark = monthly.map((p) => ratioOf(p.expense, p.revenue));
+
   const items = [
     {
       label: "Revenue",
@@ -895,7 +922,7 @@ function Kpis({
           <dd className="mt-2 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
             {k.value}
           </dd>
-          <div className="mt-4 px-2">
+          <div className="mt-4 min-h-12 px-2">
             <Sparkline
               values={k.spark}
               className={k.stroke}
@@ -916,17 +943,47 @@ function Kpis({
           </dd>
         </div>
       ))}
+      {/* Cost to income: cumulative cost ÷ cumulative revenue, vs the same quarters last year. */}
       <div className="card-raised flex flex-col rounded-xl border border-line bg-surface p-5 sm:p-6">
         <dt className={`text-xs font-medium uppercase tracking-wide ${muted}`}>
-          Net margin
+          Cost to income
         </dt>
         <dd className="mt-2 text-2xl font-semibold tracking-tight lg:text-[1.75rem]">
-          {pct(d.netMarginPct)}
+          {pct(costToIncome)}
         </dd>
+        <div className="mt-4 min-h-12 px-2">
+          <Sparkline
+            values={ctiSpark}
+            className="stroke-blue"
+            color="var(--color-blue)"
+            gradId="spark-cost-income"
+            marker={false}
+          />
+        </div>
         <dd
-          className={`mt-4 border-t border-line pt-4 text-xs ${muted}`}
+          className={`mt-4 flex flex-nowrap items-center gap-x-1.5 border-t border-line pt-4 text-[11px] tabular-nums ${muted}`}
         >
-          Net result as a share of revenue
+          {ptsChange !== null && (
+            <span
+              className={`inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full px-2 py-0.5 font-semibold ${
+                ptsChange <= 0 ? "bg-positive/10 text-positive" : "bg-negative/10 text-negative"
+              }`}
+            >
+              {ptsChange <= 0 ? (
+                <ArrowDownRight aria-hidden className="size-3.5" />
+              ) : (
+                <ArrowUpRight aria-hidden className="size-3.5" />
+              )}
+              {Math.abs(ptsChange).toFixed(1)} pts
+            </span>
+          )}
+          <span className="min-w-0 truncate whitespace-nowrap">
+            vs {c.label} (
+            {priorCostToIncome !== null
+              ? pct(priorCostToIncome)
+              : `Revenue ${toNum(c.revenue) ? money(c.revenue, cur, true, 2) : "0"} · Cost ${money(c.expense, cur, true, 2)}`}
+            )
+          </span>
         </dd>
       </div>
     </dl>
@@ -1170,7 +1227,8 @@ function YearOverYear({
   currency: string;
   href: (year: number) => string;
 }) {
-  const label = (r: YearRow) => (r.complete ? String(r.year) : `${r.year} YTD`);
+  const label = (r: YearRow) =>
+    r.complete || !r.hasData ? String(r.year) : `${r.year} YTD`;
   const table = rows
     .map((r, i) => {
       const prior = priorComparable(
@@ -1263,7 +1321,7 @@ function YearOverYear({
                     >
                       {r.year}
                     </Link>
-                    {!r.complete && (
+                    {!r.complete && r.hasData && (
                       <span className={`ml-1.5 text-xs font-normal ${muted}`}>
                         {r.closedThrough ? `to Q${r.closedThrough}` : "open"}
                       </span>
@@ -1312,18 +1370,33 @@ function Breakdown({
 }) {
   const cur = res.currency;
   if (!res.data.length) {
+    // No category breakdown for this period: show the period total as the whole (100%).
+    const total = toNum(res.total) ?? 0;
+    const label = type === "expense" ? "costs" : "revenue";
+    const fill = type === "expense" ? "bg-secondary" : "bg-primary";
     return (
-      <EmptyState
-        title={`No ${type === "expense" ? "cost" : "revenue"} recorded`}
-        message="There are no postings for this period."
-      />
+      <div>
+        <div className="flex items-baseline justify-between gap-4 text-sm">
+          <span>Total {label}</span>
+          <span className="font-semibold">{money(total, cur)}</span>
+        </div>
+        <div
+          aria-hidden
+          className="my-1.5 h-1.5 overflow-hidden rounded-full bg-hover"
+        >
+          <div className={`h-full rounded-full ${fill}`} style={{ width: total ? "100%" : "0%" }} />
+        </div>
+        <div className={`flex justify-between text-xs ${muted}`}>
+          <span>{total ? "100%" : "0%"} of total</span>
+        </div>
+      </div>
     );
   }
   const maxShare = Math.max(...res.data.map((r) => toNum(r.sharePct) ?? 0), 1);
   const fill = type === "expense" ? "bg-secondary" : "bg-primary";
   return (
     <>
-      <ol className="grid gap-4">
+      <ol className="grid gap-3.5">
         {res.data.map((r, i) => {
           const share = toNum(r.sharePct) ?? 0;
           return (
@@ -1331,11 +1404,13 @@ function Breakdown({
               key={r.categoryId}
               className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-x-2"
             >
-              <span className={`pt-px text-xs ${muted}`}>{i + 1}</span>
-              <div>
-                <div className="flex items-baseline justify-between gap-4 text-sm">
-                  <span className="truncate">{r.categoryName}</span>
-                  <span className="font-semibold">{money(r.amount, cur)}</span>
+              <span className={`pt-0.5 text-xs tabular-nums ${muted}`}>{i + 1}</span>
+              <div className="min-w-0">
+                <div className="text-sm leading-snug [overflow-wrap:anywhere]">
+                  {r.categoryName}
+                </div>
+                <div className="mt-0.5 text-right text-sm font-semibold tabular-nums">
+                  {money(r.amount, cur)}
                 </div>
                 <div
                   aria-hidden

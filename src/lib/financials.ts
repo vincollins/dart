@@ -106,13 +106,28 @@ async function get<T>(
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
   }
-  const res = await fetch(`${API_BASE}${prefix}${path}?${qs}`, {
-    cache: "no-store",
+  // Retry network errors and 5xx responses a couple of times, so a single
+  // hiccup doesn't make a year or company disappear. "No data" (404) is a real
+  // answer and is not retried.
+  const url = `${API_BASE}${prefix}${path}?${qs}`;
+  const init = {
+    cache: "no-store" as const,
     headers: {
       Accept: "application/json",
       ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
     },
-  });
+  };
+  let res: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      res = await fetch(url, init);
+      if (res.status < 500) break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+    }
+    await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+  }
+  if (!res) throw new ApiError(0, "NETWORK_ERROR", "The data service did not respond.");
   if (!res.ok) {
     let message = res.statusText;
     let code = "HTTP_ERROR";
